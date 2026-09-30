@@ -1,0 +1,178 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+
+# ==========================================
+# 1. PARAMETERS & CONFIGURATION
+# ==========================================
+FIELD_SIZE = 100        # 100x100 meter monitoring area
+NUM_NODES = 15          # Number of sensor nodes to deploy
+NUM_TARGETS = 30        # Targets/points of interest to cover
+SENSING_RADIUS = 15     # Rs: distance a node can monitor targets (meters)
+COMM_RADIUS = 25        # Rc: distance a node can communicate with others (meters)
+
+# Central Base Station / Sink Node position
+SINK_POS = np.array([FIELD_SIZE / 2, FIELD_SIZE / 2])
+
+# GA Hyperparameters
+POP_SIZE = 50
+GENERATIONS = 100
+CROSSOVER_RATE = 0.8
+MUTATION_RATE = 0.1
+MUTATION_SCALE = 5.0    # Max coordinate shift during mutation (meters)
+
+# Generate static random target locations across the field
+np.random.seed(42)  # Seed for reproducible target distribution
+TARGET_POSITIONS = np.random.uniform(0, FIELD_SIZE, (NUM_TARGETS, 2))
+
+# ==========================================
+# 2. FITNESS & CORE UTILITY FUNCTIONS
+# ==========================================
+def calculate_fitness(individual):
+    """
+    Evaluates individual deployment profiles.
+    Chromosomes are shaped as flat arrays: [x1, y1, x2, y2, ... xN, yN]
+    """
+    nodes = individual.reshape((NUM_NODES, 2))
+    
+    # --- Metric 1: Target Coverage ---
+    # Compute distances between all targets and all nodes
+    # Shape: (NUM_TARGETS, NUM_NODES)
+    dist_t2n = np.linalg.norm(TARGET_POSITIONS[:, np.newaxis, :] - nodes[np.newaxis, :, :], axis=2)
+    # Target is covered if it's within SENSING_RADIUS of at least one node
+    covered_targets = np.any(dist_t2n <= SENSING_RADIUS, axis=1)
+    coverage_score = np.sum(covered_targets) / NUM_TARGETS
+
+    # --- Metric 2: Node Overlap Penalty ---
+    # Penalize nodes that are clustered too tightly together
+    dist_n2n = np.linalg.norm(nodes[:, np.newaxis, :] - nodes[np.newaxis, :, :], axis=2)
+    # Mask self-distances
+    np.fill_diagonal(dist_n2n, np.inf)
+    overlap_penalty = np.sum(dist_n2n < (SENSING_RADIUS / 2)) / (NUM_NODES * NUM_NODES)
+
+    # --- Metric 3: Connectivity Network Score ---
+    # Measure what fraction of nodes can route data back to the central sink
+    connected_to_sink = np.zeros(NUM_NODES, dtype=bool)
+    
+    # Direct connections to the sink
+    dist_to_sink = np.linalg.norm(nodes - SINK_POS, axis=1)
+    connected_to_sink[dist_to_sink <= COMM_RADIUS] = True
+    
+    # Multi-hop routing propagation via adjacency matrix
+    adj_matrix = dist_n2n <= COMM_RADIUS
+    for _ in range(NUM_NODES):
+        new_connections = np.dot(adj_matrix, connected_to_sink) > 0
+        if np.all(new_connections == connected_to_sink):
+            break
+        connected_to_sink = connected_to_sink | new_connections
+        
+    connectivity_score = np.sum(connected_to_sink) / NUM_NODES
+
+    # Composite Fitness (Maximize coverage and connectivity, minimize overlap)
+    fitness = (0.6 * coverage_score) + (0.3 * connectivity_score) - (0.1 * overlap_penalty)
+    return max(0.0, fitness)
+
+# ==========================================
+# 3. GENETIC ALGORITHM ENGINE
+# ==========================================
+def initialize_population():
+    # Continuous coordinate representation bounded within the field
+    return np.random.uniform(0, FIELD_SIZE, (POP_SIZE, NUM_NODES * 2))
+
+def selection(population, fitness_scores):
+    # Tournament Selection
+    selected = []
+    for _ in range(POP_SIZE):
+        i, j = random.sample(range(POP_SIZE), 2)
+        if fitness_scores[i] >= fitness_scores[j]:
+            selected.append(population[i])
+        else:
+            selected.append(population[j])
+    return np.array(selected)
+
+def crossover(parent1, parent2):
+    if random.random() < CROSSOVER_RATE:
+        # Uniform crossover on node coordinate blocks
+        mask = np.random.randint(0, 2, size=NUM_NODES * 2).astype(bool)
+        child1 = np.where(mask, parent1, parent2)
+        child2 = np.where(mask, parent2, parent1)
+        return child1, child2
+    return parent1.copy(), parent2.copy()
+
+def mutate(individual):
+    # Gaussian mutation tracking bounded constraints
+    for i in range(len(individual)):
+        if random.random() < MUTATION_RATE:
+            individual[i] += np.random.normal(0, MUTATION_SCALE)
+            individual[i] = np.clip(individual[i], 0, FIELD_SIZE)
+    return individual
+
+# ==========================================
+# 4. EXECUTION LOOP
+# ==========================================
+population = initialize_population()
+best_fitness_history = []
+
+print("Running Genetic Algorithm Optimization...")
+for generation in range(GENERATIONS):
+    fitness_scores = np.array([calculate_fitness(ind) for ind in population])
+    
+    best_idx = np.argmax(fitness_scores)
+    best_fitness_history.append(fitness_scores[best_idx])
+    
+    if generation % 10 == 0 or generation == GENERATIONS - 1:
+        print(f"Generation {generation:02d}: Max Fitness = {fitness_scores[best_idx]:.4f}")
+    
+    # Selection
+    selected_pop = selection(population, fitness_scores)
+    
+    # Elitism: carry the best individual over natively
+    next_population = [population[best_idx]]
+    
+    # Breed remaining spaces
+    while len(next_population) < POP_SIZE:
+        p1, p2 = random.sample(list(selected_pop), 2)
+        c1, c2 = crossover(p1, p2)
+        next_population.append(mutate(c1))
+        if len(next_population) < POP_SIZE:
+            next_population.append(mutate(c2))
+            
+    population = np.array(next_population)
+
+# Extract optimized solution layout
+best_scores = np.array([calculate_fitness(ind) for ind in population])
+best_individual = population[np.argmax(best_scores)]
+best_nodes = best_individual.reshape((NUM_NODES, 2))
+
+# ==========================================
+# 5. VISUALIZATION OF RESULTS
+# ==========================================
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+# Plot Fitness Curve Evolution
+ax1.plot(best_fitness_history, color='teal', lw=2)
+ax1.set_title("Fitness Score Optimization Over Generations")
+ax1.set_xlabel("Generation")
+ax1.set_ylabel("Best Fitness Score")
+ax1.grid(True)
+
+# Plot Final Node Deployment Layout
+ax2.scatter(TARGET_POSITIONS[:, 0], TARGET_POSITIONS[:, 1], color='crimson', marker='x', label='Targets')
+ax2.scatter(SINK_POS[0], SINK_POS[1], color='gold', marker='*', s=250, edgecolor='black', zorder=5, label='Sink Node')
+ax2.scatter(best_nodes[:, 0], best_nodes[:, 1], color='dodgerblue', s=70, label='Sensor Nodes')
+
+# Draw Sensing Coverage Envelopes
+for node in best_nodes:
+    circle = plt.Circle((node[0], node[1]), SENSING_RADIUS, color='dodgerblue', alpha=0.1, fill=True)
+    ax2.add_patch(circle)
+
+ax2.set_xlim(0, FIELD_SIZE)
+ax2.set_ylim(0, FIELD_SIZE)
+ax2.set_title(f"Optimized WSN Placement (Nodes: {NUM_NODES})")
+ax2.set_xlabel("X Coordinate (meters)")
+ax2.set_ylabel("Y Coordinate (meters)")
+ax2.legend(loc='upper right')
+ax2.grid(True)
+
+plt.tight_layout()
+plt.show()
